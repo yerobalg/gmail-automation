@@ -1,0 +1,6 @@
+.env
+gmail-automation
+gmail-automation.exe
+gmail-automation-*
+*.log
+.DS_Store
