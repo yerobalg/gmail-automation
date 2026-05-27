@@ -29,14 +29,11 @@ type config struct {
 	senderName string
 	subject    string
 	root       string
+	smtpHost   string
+	smtpPort   string
 	maxN       int
 	maxB       int64
 }
-
-const (
-	smtpHost = "smtp.gmail.com"
-	smtpAddr = "smtp.gmail.com:465"
-)
 
 func main() {
 	envPath := flag.String("env", "", "path to .env file (optional)")
@@ -104,14 +101,19 @@ func parseEnv(s string) {
 
 func loadConfig() (*config, error) {
 	c := &config{
-		user:       os.Getenv("GMAIL_USER"),
-		pwd:        os.Getenv("GMAIL_APP_PASSWORD"),
+		user:       os.Getenv("SMTP_USER"),
+		pwd:        os.Getenv("SMTP_PASSWORD"),
 		senderName: getDefault("SENDER_NAME", "Laksono"),
 		subject:    getDefault("EMAIL_SUBJECT", "Invoice"),
 		root:       getDefault("ATTACHMENTS_ROOT", "./attachments"),
+		smtpHost:   getDefault("SMTP_HOST", "smtp.gmail.com"),
+		smtpPort:   getDefault("SMTP_PORT", "465"),
 	}
 	if c.user == "" || c.pwd == "" {
-		return nil, fmt.Errorf("GMAIL_USER and GMAIL_APP_PASSWORD are required in .env")
+		return nil, fmt.Errorf("SMTP_USER and SMTP_PASSWORD are required in .env")
+	}
+	if _, err := strconv.Atoi(c.smtpPort); err != nil {
+		return nil, fmt.Errorf("SMTP_PORT must be numeric, got %q", c.smtpPort)
 	}
 	n, err := strconv.Atoi(getDefault("MAX_ATTACHMENTS_PER_EMAIL", "5"))
 	if err != nil || n <= 0 {
@@ -135,18 +137,46 @@ func getDefault(k, d string) string {
 	return d
 }
 
-func run(c *config) error {
-	conn, err := tls.Dial("tcp", smtpAddr, &tls.Config{ServerName: smtpHost})
-	if err != nil {
-		return fmt.Errorf("tls dial: %w", err)
+func dialSMTP(host, port string) (*smtp.Client, error) {
+	addr := host + ":" + port
+	tlsCfg := &tls.Config{ServerName: host}
+
+	if port == "465" {
+		conn, err := tls.Dial("tcp", addr, tlsCfg)
+		if err != nil {
+			return nil, fmt.Errorf("tls dial %s: %w", addr, err)
+		}
+		client, err := smtp.NewClient(conn, host)
+		if err != nil {
+			conn.Close()
+			return nil, fmt.Errorf("smtp client: %w", err)
+		}
+		return client, nil
 	}
-	client, err := smtp.NewClient(conn, smtpHost)
+
+	client, err := smtp.Dial(addr)
 	if err != nil {
-		return fmt.Errorf("smtp client: %w", err)
+		return nil, fmt.Errorf("dial %s: %w", addr, err)
+	}
+	if ok, _ := client.Extension("STARTTLS"); !ok {
+		client.Quit()
+		return nil, fmt.Errorf("server %s does not advertise STARTTLS on port %s", host, port)
+	}
+	if err := client.StartTLS(tlsCfg); err != nil {
+		client.Quit()
+		return nil, fmt.Errorf("starttls: %w", err)
+	}
+	return client, nil
+}
+
+func run(c *config) error {
+	client, err := dialSMTP(c.smtpHost, c.smtpPort)
+	if err != nil {
+		return err
 	}
 	defer client.Quit()
 
-	if err := client.Auth(smtp.PlainAuth("", c.user, c.pwd, smtpHost)); err != nil {
+	if err := client.Auth(smtp.PlainAuth("", c.user, c.pwd, c.smtpHost)); err != nil {
 		return fmt.Errorf("auth: %w", err)
 	}
 
